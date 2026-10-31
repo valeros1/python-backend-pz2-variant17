@@ -1,0 +1,4 @@
+imageio-ffmpeg>=0.7,<0.8
+Pillow>=13,<14
+pytest>=8,<9
+pycodestyle>=2,<3
