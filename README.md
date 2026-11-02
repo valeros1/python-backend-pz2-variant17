@@ -59,3 +59,68 @@ WebM. `make test` проверяет все пять примеров и нек�
 | `examples/demo.py` | Генерация и запуск пяти примеров |
 | `tests/test_converter.py` | Проверка полученного видео и ошибок |
 | `Makefile` | Команды установки, показа и проверок |
+
+## HTTP API второго этапа
+
+Сервер запускается командой `make run` и принимает запросы на
+`http://127.0.0.1:8000`. При первом запуске он читает демонстрационные
+настройки из `config.example.json`: логин `student`, пароль `change-me`,
+тестовый режим включён. Для собственных настроек скопируйте этот файл
+в `config.json` и измените поля. `config.json` не попадает в Git.
+
+Проверка из другого окна терминала:
+
+```bash
+curl -u student:change-me -H 'Content-Type: application/xml' \
+  -d '<member><ip>127.0.0.1</ip><locale>ru</locale><platform>macOS</platform></member>' \
+  http://127.0.0.1:8000/api/submit-member
+```
+
+Ответ содержит XML-запись `Member` с новым `identifier`. Без параметра
+`-u` этот же запрос получит HTTP 401. Данные пока находятся только в
+памяти запущенного сервера и исчезают после остановки.
+
+Все десять адресов из задания созданы в `src/server.py`. XML-запросы
+содержат плоские элементы: `<member>`, `<query>` или `<filter>`.
+В `POST /api/submit-query` поле `<argument>` содержит GIF, закодированный
+в Base64. Сервер создаёт Query с `executing=1` и запускает фоновую задачу.
+Если `test_mode=true`, результат получает статус `test` без вызова
+конвертера. При `test_mode=false` вызывается `src.converter` через
+`subprocess`; полученный WebM записывается в `Response.output` как Base64.
+В обоих случаях после завершения задачи `executing` становится `0`.
+
+| HTTP-запрос | Метод клиента | XML-запрос |
+| --- | --- | --- |
+| `POST /api/submit-member` | `submit_member` | `<member>` |
+| `GET /api/discard-member?identifier=...` | `discard_member` | нет |
+| `POST /api/collect-member` | `collect_member` | `<filter>` |
+| `POST /api/adjust-member` | `adjust_member` | `<member>` |
+| `POST /api/submit-query` | `submit_query` | `<query>` |
+| `GET /api/discard-query?identifier=...` | `discard_query` | нет |
+| `POST /api/collect-query/{member}` | `collect_query` | `<filter>` |
+| `POST /api/adjust-query` | `adjust_query` | `<query>` |
+| `POST /api/collect-response/{query}` | `collect_response` | `<filter>` |
+| `POST /api/collect-report` | `collect_report` | нет |
+
+Пустой фильтр записывается как `<filter />`. Изменение записи передаёт
+`identifier` и изменяемые поля внутри `<member>` или `<query>`.
+При удалении завершённой Query удаляются и её Response, поскольку
+отдельного HTTP-маршрута для удаления Response в задании нет.
+Выполняющуюся Query удалять нельзя. Member с существующими Query тоже
+не удаляется: сначала нужно удалить его задачи.
+Для реального преобразования создайте `config.json` с `test_mode: false`
+и перезапустите сервер; тогда результат можно получить через
+`collect_response(query)`.
+
+Класс `ApiClient` в `src/client.py` скрывает HTTP и XML за методами с
+именами операций модели. Например, `submit_member(...)` отправляет
+`POST /api/submit-member`, а `collect_response(query)` получает результат
+задачи. Через него работают тесты `tests/test_api_stateful.py`.
+
+Тесты на основе `RuleBasedStateMachine` из Hypothesis создают и меняют
+записи, обращаются к каждому из десяти маршрутов и после каждого шага
+сравнивают состояние API с независимыми ожидаемыми записями. Команда
+`make coverage` запускает **только эти тесты** с измерением ветвей;
+сохранённый результат находится в `reports/coverage-stage2.txt`.
+Обычная команда `make test` дополнительно проверяет реальное выполнение
+конвертера и обработку ошибочного XML.

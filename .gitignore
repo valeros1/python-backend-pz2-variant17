@@ -8,4 +8,5 @@ htmlcov/
 build/
 *.sqlite3
 journal.log
+config.json
 .DS_Store
