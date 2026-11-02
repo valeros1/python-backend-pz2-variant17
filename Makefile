@@ -20,7 +20,7 @@ lint:
 
 coverage:
 	$(PYTHON) -m coverage run --branch \
-		--source=src.server,src.client,src.model,src.xml_codec \
+		--source=src.server,src.client,src.sqlite_model,src.xml_codec \
 		-m pytest -q tests/test_api_stateful.py
 	$(PYTHON) -m coverage report -m \
-		--include='src/server.py,src/client.py,src/model.py,src/xml_codec.py'
+		--include='src/server.py,src/client.py,src/sqlite_model.py,src/xml_codec.py'

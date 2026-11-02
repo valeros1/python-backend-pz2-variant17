@@ -6,6 +6,7 @@ import secrets
 import subprocess
 import sys
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from fastapi.responses import Response as HttpResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from src.model import InMemoryModel, ModelError
+from src.sqlite_model import SQLiteModel
 from src.xml_codec import XmlError, parse_fields, render_xml
 
 
@@ -22,6 +24,7 @@ class Settings:
     username: str
     password: str
     test_mode: bool
+    database: str = ":memory:"
 
 
 def load_settings(path: str | Path | None = None) -> Settings:
@@ -30,7 +33,8 @@ def load_settings(path: str | Path | None = None) -> Settings:
     if path is None and not chosen.exists():
         chosen = Path(__file__).resolve().parent.parent / "config.example.json"
     data = json.loads(chosen.read_text(encoding="utf-8"))
-    return Settings(data["username"], data["password"], data["test_mode"])
+    return Settings(data["username"], data["password"], data["test_mode"],
+                    data.get("database", "build/app.sqlite3"))
 
 
 def _xml(name: str, value) -> HttpResponse:
@@ -44,7 +48,7 @@ def _required(fields: dict, *names: str) -> dict:
     return {name: fields[name] for name in names}
 
 
-def _run_conversion(model: InMemoryModel, query_id: int,
+def _run_conversion(model: InMemoryModel | SQLiteModel, query_id: int,
                     gif_bytes: bytes, test_mode: bool) -> None:
     """Фоновое выполнение ранее созданной задачи Query."""
     started = time.monotonic()
@@ -67,11 +71,19 @@ def _run_conversion(model: InMemoryModel, query_id: int,
 
 
 def create_app(settings: Settings | None = None,
-               model: InMemoryModel | None = None) -> FastAPI:
+               model: InMemoryModel | SQLiteModel | None = None) -> FastAPI:
     """Создать независимый экземпляр API для сервера или теста."""
     settings = settings or load_settings()
-    model = model or InMemoryModel()
-    app = FastAPI(title="GIF to WebM API")
+    owns_model = model is None
+    model = model if model is not None else SQLiteModel(settings.database)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        if owns_model:
+            model.close()
+
+    app = FastAPI(title="GIF to WebM API", lifespan=lifespan)
     app.state.model = model
     security = HTTPBasic(auto_error=False)
 

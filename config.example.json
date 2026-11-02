@@ -1,5 +1,6 @@
 {
   "username": "student",
   "password": "change-me",
-  "test_mode": true
+  "test_mode": true,
+  "database": "build/app.sqlite3"
 }
