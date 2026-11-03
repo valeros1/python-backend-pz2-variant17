@@ -1,7 +1,8 @@
 """Простой проход от HTTP-запроса к записи результата."""
 
 import base64
-from xml.etree import ElementTree as ET
+from http import HTTPStatus
+import xml.etree.ElementTree as element_tree
 
 from fastapi.testclient import TestClient
 
@@ -14,7 +15,7 @@ def test_basic_auth_and_xml_workflow():
     app = create_app(Settings("student", "secret", True))
     with TestClient(app) as client:
         denied = client.post("/api/collect-report")
-        assert denied.status_code == 401
+        assert denied.status_code == HTTPStatus.UNAUTHORIZED
 
         client.auth = ("student", "secret")
         created = client.post(
@@ -22,22 +23,23 @@ def test_basic_auth_and_xml_workflow():
             content="<member><ip>127.0.0.1</ip><locale>ru</locale>"
                     "<platform>macOS</platform></member>",
         )
-        assert created.status_code == 200
+        assert created.status_code == HTTPStatus.OK
         assert created.headers["content-type"].startswith("application/xml")
-        member_id = ET.fromstring(created.content).findtext("identifier")
+        member_id = element_tree.fromstring(created.content).findtext(
+            "identifier")
 
         gif = base64.b64encode(make_gif(SAMPLES[0])).decode("ascii")
-        submitted = client.post(
-            "/api/submit-query",
-            content=f"<query><argument>{gif}</argument><member>{member_id}"
-                    "</member><description>sample</description></query>",
-        )
-        assert submitted.status_code == 200
-        query_id = ET.fromstring(submitted.content).findtext("identifier")
+        query_xml = (f"<query><argument>{gif}</argument>"
+                     f"<member>{member_id}</member>"
+                     "<description>sample</description></query>")
+        submitted = client.post("/api/submit-query", content=query_xml)
+        assert submitted.status_code == HTTPStatus.OK
+        query_id = element_tree.fromstring(submitted.content).findtext(
+            "identifier")
 
         collected = client.post(f"/api/collect-response/{query_id}",
                                 content="<filter />")
-        response = ET.fromstring(collected.content).find("item")
+        response = element_tree.fromstring(collected.content).find("item")
         assert response.findtext("status") == "test"
         assert response.findtext("query") == query_id
 
@@ -47,8 +49,8 @@ def test_invalid_xml_returns_xml_error():
     with TestClient(app) as client:
         client.auth = ("student", "secret")
         result = client.post("/api/submit-member", content="<member>")
-    assert result.status_code == 400
-    assert ET.fromstring(result.content).tag == "error"
+    assert result.status_code == HTTPStatus.BAD_REQUEST
+    assert element_tree.fromstring(result.content).tag == "error"
 
 
 def test_real_conversion_uses_command_line_converter():
