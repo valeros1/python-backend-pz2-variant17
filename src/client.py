@@ -1,7 +1,8 @@
 """Клиент десяти XML-методов HTTP API варианта 17."""
 
 import base64
-from xml.etree import ElementTree as ET
+from http import HTTPStatus
+import xml.etree.ElementTree as element_tree
 
 import httpx
 
@@ -12,7 +13,7 @@ class ApiError(RuntimeError):
     """HTTP API отклонил запрос."""
 
 
-def _record(element: ET.Element) -> dict:
+def _record(element: element_tree.Element) -> dict:
     result = {}
     for child in element:
         value = child.text or ""
@@ -42,9 +43,9 @@ class ApiClient:
             method, path, auth=self.auth, content=content, params=params,
             headers={"Content-Type": "application/xml"},
         )
-        if response.status_code != 200:
+        if response.status_code != HTTPStatus.OK:
             raise ApiError(f"HTTP {response.status_code}: {response.text}")
-        document = ET.fromstring(response.content)
+        document = element_tree.fromstring(response.content)
         if document.tag in {"members", "queries", "responses", "report"}:
             return [_record(item) for item in document.findall("item")]
         return _record(document)

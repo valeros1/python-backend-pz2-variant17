@@ -5,11 +5,12 @@ import json
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
-from fastapi.responses import Response as HttpResponse
+from fastapi.responses import Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from src.model import InMemoryModel, ModelError
@@ -32,8 +33,8 @@ def load_settings(path: str | Path | None = None) -> Settings:
     return Settings(data["username"], data["password"], data["test_mode"])
 
 
-def _xml(name: str, value) -> HttpResponse:
-    return HttpResponse(render_xml(name, value), media_type="application/xml")
+def _xml(name: str, value) -> Response:
+    return Response(render_xml(name, value), media_type="application/xml")
 
 
 def _required(fields: dict, *names: str) -> dict:
@@ -65,13 +66,7 @@ def _run_conversion(model: InMemoryModel, query_id: int,
     model.finish_query(query_id, output, status, str(error), duration)
 
 
-def create_app(settings: Settings | None = None,
-               model: InMemoryModel | None = None) -> FastAPI:
-    """Создать независимый экземпляр API для сервера или теста."""
-    settings = settings or load_settings()
-    model = model or InMemoryModel()
-    app = FastAPI(title="GIF to WebM API")
-    app.state.model = model
+def _make_authenticator(settings: Settings) -> Callable:
     security = HTTPBasic(auto_error=False)
 
     def authenticate(credentials: HTTPBasicCredentials | None =
@@ -83,38 +78,50 @@ def create_app(settings: Settings | None = None,
             raise HTTPException(401, "Unauthorized",
                                 headers={"WWW-Authenticate": "Basic"})
 
+    return authenticate
+
+
+def _register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(ModelError)
     @app.exception_handler(XmlError)
-    async def bad_input(_request: Request, error: Exception) -> HttpResponse:
-        return HttpResponse(render_xml("error", {"message": str(error)}),
-                            status_code=400, media_type="application/xml")
+    async def bad_input(_request: Request, error: Exception) -> Response:
+        return Response(render_xml("error", {"message": str(error)}),
+                        status_code=400, media_type="application/xml")
 
+
+def _register_member_routes(app: FastAPI, model: InMemoryModel,
+                            authenticate: Callable) -> None:
     @app.post("/api/submit-member", dependencies=[Depends(authenticate)])
-    async def submit_member(request: Request) -> HttpResponse:
+    async def submit_member(request: Request) -> Response:
         fields = parse_fields(await request.body(), "member")
         values = _required(fields, "ip", "locale", "platform")
         values["datetime"] = fields.get("datetime")
         return _xml("member", model.submit_member(**values))
 
     @app.get("/api/discard-member", dependencies=[Depends(authenticate)])
-    def discard_member(identifier: int) -> HttpResponse:
+    def discard_member(identifier: int) -> Response:
         return _xml("member", model.discard_member(identifier))
 
     @app.post("/api/collect-member", dependencies=[Depends(authenticate)])
-    async def collect_member(request: Request) -> HttpResponse:
+    async def collect_member(request: Request) -> Response:
         fields = parse_fields(await request.body(), "filter")
         return _xml("members", model.collect_member(fields))
 
     @app.post("/api/adjust-member", dependencies=[Depends(authenticate)])
-    async def adjust_member(request: Request) -> HttpResponse:
+    async def adjust_member(request: Request) -> Response:
         fields = parse_fields(await request.body(), "member")
         identifier = _required(fields, "identifier")["identifier"]
         del fields["identifier"]
         return _xml("member", model.adjust_member(identifier, fields))
 
+
+def _register_submit_query_route(app: FastAPI,
+                                 model: InMemoryModel,
+                                 authenticate: Callable,
+                                 settings: Settings) -> None:
     @app.post("/api/submit-query", dependencies=[Depends(authenticate)])
     async def submit_query(request: Request,
-                           background: BackgroundTasks) -> HttpResponse:
+                           background: BackgroundTasks) -> Response:
         fields = parse_fields(await request.body(), "query")
         values = _required(fields, "argument", "member", "description")
         try:
@@ -126,33 +133,54 @@ def create_app(settings: Settings | None = None,
                             gif_bytes, settings.test_mode)
         return _xml("query", query)
 
+
+def _register_query_routes(app: FastAPI, model: InMemoryModel,
+                           authenticate: Callable) -> None:
     @app.get("/api/discard-query", dependencies=[Depends(authenticate)])
-    def discard_query(identifier: int) -> HttpResponse:
+    def discard_query(identifier: int) -> Response:
         return _xml("query", model.discard_query(identifier))
 
     @app.post("/api/collect-query/{member}",
               dependencies=[Depends(authenticate)])
-    async def collect_query(member: int, request: Request) -> HttpResponse:
+    async def collect_query(member: int, request: Request) -> Response:
         fields = parse_fields(await request.body(), "filter")
         return _xml("queries", model.collect_query(member, fields))
 
     @app.post("/api/adjust-query", dependencies=[Depends(authenticate)])
-    async def adjust_query(request: Request) -> HttpResponse:
+    async def adjust_query(request: Request) -> Response:
         fields = parse_fields(await request.body(), "query")
         identifier = _required(fields, "identifier")["identifier"]
         del fields["identifier"]
         return _xml("query", model.adjust_query(identifier, fields))
 
+
+def _register_result_routes(app: FastAPI,
+                            model: InMemoryModel,
+                            authenticate: Callable) -> None:
     @app.post("/api/collect-response/{query}",
               dependencies=[Depends(authenticate)])
-    async def collect_response(query: int, request: Request) -> HttpResponse:
+    async def collect_response(query: int, request: Request) -> Response:
         fields = parse_fields(await request.body(), "filter")
         return _xml("responses", model.collect_response(query, fields))
 
     @app.post("/api/collect-report", dependencies=[Depends(authenticate)])
-    def collect_report() -> HttpResponse:
+    def collect_report() -> Response:
         return _xml("report", model.collect_report())
 
+
+def create_app(settings: Settings | None = None,
+               model: InMemoryModel | None = None) -> FastAPI:
+    """Создать независимый экземпляр API для сервера или теста."""
+    settings = settings or load_settings()
+    model = model if model is not None else InMemoryModel()
+    app = FastAPI(title="GIF to WebM API")
+    app.state.model = model
+    authenticate = _make_authenticator(settings)
+    _register_error_handlers(app)
+    _register_member_routes(app, model, authenticate)
+    _register_submit_query_route(app, model, authenticate, settings)
+    _register_query_routes(app, model, authenticate)
+    _register_result_routes(app, model, authenticate)
     return app
 
 
