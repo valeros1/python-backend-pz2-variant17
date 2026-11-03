@@ -40,7 +40,7 @@ class Response(NamedTuple):
 
 
 class ReportRow(NamedTuple):
-    argument: str
+    argument: str | None
     cache_hit: int
     status: str
 
@@ -161,12 +161,22 @@ class InMemoryModel:
                 if item.query == query and _matching(item, filters or {})]
 
     def collect_report(self, now: int | None = None) -> list[ReportRow]:
-        """Соединить Query/Response, оставить последние семь минут."""
+        """Полностью соединить Query и Response, затем отобрать ответы."""
         border = _now(now) - RECENT_SECONDS
-        rows = [ReportRow(self.queries[item.query].argument,
-                          item.cache_hit, item.status)
-                for item in self.responses.values()
-                if item.datetime >= border]
+        pairs = []
+        for query in self.queries.values():
+            related = [response for response in self.responses.values()
+                       if response.query == query.identifier]
+            if related:
+                pairs.extend((query, response) for response in related)
+            else:
+                pairs.append((query, None))
+        pairs.extend((None, response) for response in self.responses.values()
+                     if response.query not in self.queries)
+        rows = [ReportRow(query.argument if query is not None else None,
+                          response.cache_hit, response.status)
+                for query, response in pairs
+                if response is not None and response.datetime >= border]
         return list(dict.fromkeys(rows))
 
     def finish_query(self, query: int, output: str, status: str,
