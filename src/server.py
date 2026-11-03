@@ -2,7 +2,6 @@
 
 import base64
 import json
-import secrets
 import subprocess
 import sys
 import time
@@ -77,12 +76,9 @@ def create_app(settings: Settings | None = None,
 
     def authenticate(credentials: HTTPBasicCredentials | None =
                      Depends(security)) -> None:
-        valid = credentials is not None
-        if valid:
-            valid = (secrets.compare_digest(credentials.username,
-                                            settings.username)
-                     & secrets.compare_digest(credentials.password,
-                                              settings.password))
+        valid = (credentials is not None
+                 and credentials.username == settings.username
+                 and credentials.password == settings.password)
         if not valid:
             raise HTTPException(401, "Unauthorized",
                                 headers={"WWW-Authenticate": "Basic"})

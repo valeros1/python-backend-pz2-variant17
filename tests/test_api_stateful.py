@@ -1,11 +1,13 @@
 """Hypothesis генерирует последовательности действий через HTTP-клиент."""
 
 import base64
+from http import HTTPStatus
 
+import pytest
 from fastapi.testclient import TestClient
 from hypothesis import settings, strategies as st
-from hypothesis.stateful import (RuleBasedStateMachine, initialize,
-                                 invariant, precondition, rule)
+from hypothesis.stateful import (Bundle, RuleBasedStateMachine, invariant,
+                                 multiple, rule)
 
 from examples.demo import SAMPLES, make_gif
 from src.client import ApiClient, ApiError
@@ -17,6 +19,9 @@ GIFS = (make_gif(SAMPLES[0]), make_gif(SAMPLES[1]))
 
 class ApiMachine(RuleBasedStateMachine):
     """Независимые ожидаемые записи сверяются с состоянием сервера."""
+
+    member_ids = Bundle("member_ids")
+    query_ids = Bundle("query_ids")
 
     def __init__(self):
         super().__init__()
@@ -55,90 +60,74 @@ class ApiMachine(RuleBasedStateMachine):
         self.next_query += 1
         return result["identifier"]
 
-    @initialize()
-    def required_routes(self):
-        """Каждый из десяти обработчиков вызывается в каждом прогоне."""
-        member = self.add_member(1)
-        assert len(self.client.collect_member()) == 1
-        self.client.adjust_member(member, {"locale": "en"})
-        self.members[member]["locale"] = "en"
-        query = self.add_query(member)
-        assert len(self.client.collect_query(member)) == 1
-        self.client.adjust_query(query, {"description": "updated"})
-        self.queries[query]["description"] = "updated"
-        assert len(self.client.collect_response(query)) == 1
-        assert len(self.client.collect_report()) == 1
-        self.client.discard_query(query)
-        del self.queries[query]
-        self.client.discard_member(member)
-        del self.members[member]
-        unused = self.add_member(2)
-        assert self.client.collect_member({"identifier": unused})
-
-    @rule(number=st.integers(min_value=3, max_value=200))
+    @rule(target=member_ids, number=st.integers(min_value=1, max_value=200))
     def create_member(self, number):
-        self.add_member(number)
+        return self.add_member(number)
 
-    @precondition(lambda self: bool(self.members))
-    @rule(index=st.integers(min_value=0, max_value=100))
-    def update_member(self, index):
-        identifier = sorted(self.members)[index % len(self.members)]
+    @rule(member=member_ids)
+    def update_member(self, member):
+        if member not in self.members:
+            with pytest.raises(ApiError, match="HTTP 400"):
+                self.client.adjust_member(member, {"locale": "en"})
+            return
+        identifier = member
         locale = "en" if self.members[identifier]["locale"] == "ru" else "ru"
         self.client.adjust_member(identifier, {"locale": locale})
         self.members[identifier]["locale"] = locale
 
-    @precondition(lambda self: bool(self.members))
-    @rule(index=st.integers(min_value=0, max_value=100))
-    def create_query(self, index):
-        member = sorted(self.members)[index % len(self.members)]
-        self.add_query(member)
+    @rule(target=query_ids, member=member_ids)
+    def create_query(self, member):
+        if member not in self.members:
+            with pytest.raises(ApiError, match="HTTP 400"):
+                self.client.submit_query(GIFS[0], member, "sample")
+            return multiple()
+        return self.add_query(member)
 
-    @precondition(lambda self: bool(self.queries))
-    @rule(index=st.integers(min_value=0, max_value=100))
-    def update_query(self, index):
-        identifier = sorted(self.queries)[index % len(self.queries)]
-        description = f"changed-{index}"
-        self.client.adjust_query(identifier, {"description": description})
-        self.queries[identifier]["description"] = description
+    @rule(query=query_ids,
+          description=st.text(alphabet="abc", max_size=8))
+    def update_query(self, query, description):
+        if query not in self.queries:
+            with pytest.raises(ApiError, match="HTTP 400"):
+                self.client.adjust_query(query, {"description": description})
+            return
+        self.client.adjust_query(query, {"description": description})
+        self.queries[query]["description"] = description
 
-    @precondition(lambda self: bool(self.members))
-    @rule(index=st.integers(min_value=0, max_value=100))
-    def try_discard_member(self, index):
-        identifier = sorted(self.members)[index % len(self.members)]
-        linked = any(item["member"] == identifier
+    @rule(member=member_ids)
+    def try_discard_member(self, member):
+        linked = any(item["member"] == member
                      for item in self.queries.values())
-        if linked:
-            try:
-                self.client.discard_member(identifier)
-            except ApiError:
-                return
-            raise AssertionError("Связанный Member был удалён")
-        self.client.discard_member(identifier)
-        del self.members[identifier]
+        if member not in self.members or linked:
+            with pytest.raises(ApiError, match="HTTP 400"):
+                self.client.discard_member(member)
+            return
+        self.client.discard_member(member)
+        del self.members[member]
 
-    @precondition(lambda self: bool(self.queries))
-    @rule(index=st.integers(min_value=0, max_value=100))
-    def discard_query(self, index):
-        identifier = sorted(self.queries)[index % len(self.queries)]
-        self.client.discard_query(identifier)
-        del self.queries[identifier]
+    @rule(query=query_ids)
+    def discard_query(self, query):
+        if query not in self.queries:
+            with pytest.raises(ApiError, match="HTTP 400"):
+                self.client.discard_query(query)
+            return
+        self.client.discard_query(query)
+        del self.queries[query]
 
     @rule()
     def reject_query_without_member(self):
-        try:
+        with pytest.raises(ApiError, match="HTTP 400"):
             self.client.submit_query(GIFS[0], 999999, "invalid")
-        except ApiError as error:
-            assert "HTTP 400" in str(error)
-        else:
-            raise AssertionError("Query без Member была создана")
 
     @rule()
-    def read_report(self):
-        arguments = dict.fromkeys(item["argument"]
-                                  for item in self.queries.values())
-        expected = [{"argument": argument, "cache_hit": 0,
-                     "status": "test"} for argument in arguments]
-        assert self.client.collect_report() == expected
+    def reject_unauthorized_request(self):
+        result = self.http.post("/api/collect-report", auth=None)
+        assert result.status_code == HTTPStatus.UNAUTHORIZED
+
+    @rule()
+    def reject_invalid_xml(self):
+        result = self.http.post("/api/submit-member", content="<member>",
+                                auth=("u", "p"))
+        assert result.status_code == HTTPStatus.BAD_REQUEST
 
     @invariant()
     def compare_all_records(self):
@@ -154,8 +143,13 @@ class ApiMachine(RuleBasedStateMachine):
             assert len(responses) == 1
             assert responses[0]["query"] == query
             assert responses[0]["status"] == "test"
+        arguments = dict.fromkeys(item["argument"]
+                                  for item in self.queries.values())
+        expected = [{"argument": argument, "cache_hit": 0,
+                     "status": "test"} for argument in arguments]
+        assert self.client.collect_report() == expected
 
 
 TestApiMachine = ApiMachine.TestCase
-TestApiMachine.settings = settings(max_examples=12, stateful_step_count=12,
+TestApiMachine.settings = settings(max_examples=20, stateful_step_count=20,
                                    deadline=None)
